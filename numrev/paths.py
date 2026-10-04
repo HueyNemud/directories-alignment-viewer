@@ -31,7 +31,6 @@ REPORTS_DIR = Path("reports")
 NER_GOLD = NER_DATA_DIR / "gold.ls.json"  # gold NER relu (évaluation)
 NER_TRAIN = NER_DATA_DIR / "train.ls.json"  # jeu d'entraînement NER
 MODELS_DIR = Path("models")
-CHANDRA_DIR = ANNUAIRES_DIR / "chandra"  # jeux de fine-tuning de Chandra (`numrev chandra-set`)
 
 OCR = ".ocr.json"
 LINES = ".lines.json"
