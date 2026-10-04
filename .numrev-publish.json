@@ -1,6 +1,7 @@
 {
- "source_commit": "85bc9d5",
+ "source_commit": "fefb4b7",
  "files": [
+  ".streamlit/config.toml",
   "README.md",
   "annuaires/1807_AD75-PER292/179-186/1807_AD75-PER292.179-186.ner.csv",
   "annuaires/1807_AD75-PER292/7-177/1807_AD75-PER292.7-177.ner.csv",
@@ -34,6 +35,7 @@
   "numrev/viewers/alignment.py",
   "numrev/viewers/assets/context.css",
   "numrev/viewers/assets/context.js",
+  "numrev/viewers/assets/theme.toml",
   "numrev/viewers/common.py",
   "numrev/viewers/context.py",
   "numrev/viewers/focus.py",
