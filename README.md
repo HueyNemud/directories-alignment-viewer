@@ -1,7 +1,7 @@
 # Viewer d'alignement des annuaires de Paris
 
 Instantané publié du viewer `numrev view alignment` du dépôt
-`numerotation_revolutionnaire` (commit `9cbf96c`), pour Streamlit Community
+`numerotation_revolutionnaire` (commit `62c5250`), pour Streamlit Community
 Cloud. **Généré par `numrev publish-viewer` : ne rien modifier ici**, corriger
 dans le dépôt source puis republier.
 
