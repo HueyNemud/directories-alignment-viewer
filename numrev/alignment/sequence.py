@@ -1,6 +1,6 @@
 """Alignement de deux suites ordonnées par Needleman-Wunsch, partagé par
-l'alignement des rubriques (`lib/section_alignment.py`) et celui des
-entrées (`align_directories_nw.py`)."""
+l'alignement des rubriques (`numrev/alignment/sections.py`) et celui des
+entrées (`numrev align nw`)."""
 
 import numpy as np
 

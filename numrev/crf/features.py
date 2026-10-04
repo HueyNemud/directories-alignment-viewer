@@ -9,7 +9,7 @@ d'attributs pour une ligne, à partir du contexte complet de la séquence
 - de reconstituer à l'identique le jeu historique (`LEGACY_GROUPS`,
   « production_v1 »), pour mesurer l'apport des évolutions ;
 - d'en retirer ou d'en ajouter un groupe à la fois pour les auditer
-  (voir audit_crf_features.py) ;
+  (voir numrev audit crf) ;
 - d'expérimenter des groupes candidats (`CANDIDATE_GROUPS`) sans toucher au
   comportement de l'annotateur tant qu'ils n'ont pas été validés.
 
@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import TypeAlias
 
-from lib.crf.labels import AnnotationLabel
+from numrev.crf.labels import AnnotationLabel
 
 Feature: TypeAlias = dict[str, str]
 FeatureSequence: TypeAlias = list[Feature]
@@ -257,9 +257,7 @@ class SequenceContext:
         return [alphabetical_key(line.plain) for line in self.normalized]
 
     def is_page_start(self, t: int) -> bool:
-        return self.page_positions is not None and (
-            t == 0 or self.page_positions[t] != self.page_positions[t - 1]
-        )
+        return self.page_positions is not None and (t == 0 or self.page_positions[t] != self.page_positions[t - 1])
 
     @cached_property
     def page_horizontal_extent(self) -> dict[Hashable, tuple[float, float]]:
@@ -333,13 +331,7 @@ def _page_start(ctx: SequenceContext, t: int) -> Feature:
 
 
 def _ocr_block(ctx: SequenceContext, t: int) -> Feature:
-    return {
-        "ocr_data_block_label": (
-            normalize_ocr_label(ctx.ocr_labels[t])
-            if ctx.ocr_labels is not None
-            else "missing"
-        )
-    }
+    return {"ocr_data_block_label": (normalize_ocr_label(ctx.ocr_labels[t]) if ctx.ocr_labels is not None else "missing")}
 
 
 def _sequence_bounds(ctx: SequenceContext, t: int) -> Feature:
@@ -494,9 +486,7 @@ def _char_length(ctx: SequenceContext, t: int) -> Feature:
     feat = {"char_length_log2": str(min(int(math.log2(length + 1)), 8))}
     if t > 0:
         ratio = length / max(len(ctx.normalized[t - 1].plain), 1)
-        feat["length_vs_prev"] = (
-            "shorter" if ratio < 0.6 else "longer" if ratio > 1.6 else "similar"
-        )
+        feat["length_vs_prev"] = "shorter" if ratio < 0.6 else "longer" if ratio > 1.6 else "similar"
     return feat
 
 
@@ -647,9 +637,7 @@ PLACEBO_GROUPS: tuple[str, ...] = tuple(g.name for g in _GROUPS if g.kind == PLA
 GroupedFeatures: TypeAlias = list[dict[str, Feature]]
 
 
-def extract_grouped_features(
-    ctx: SequenceContext, groups: Sequence[str] = PRODUCTION_GROUPS
-) -> GroupedFeatures:
+def extract_grouped_features(ctx: SequenceContext, groups: Sequence[str] = PRODUCTION_GROUPS) -> GroupedFeatures:
     """Features de chaque ligne, séparées par groupe : {groupe: {clé: valeur}}."""
     unknown = [name for name in groups if name not in FEATURE_GROUPS]
     if unknown:
@@ -669,9 +657,7 @@ def assemble_features(grouped: GroupedFeatures, groups: Sequence[str]) -> Featur
     return sequence
 
 
-def extract_features_from_context(
-    ctx: SequenceContext, groups: Sequence[str] = PRODUCTION_GROUPS
-) -> FeatureSequence:
+def extract_features_from_context(ctx: SequenceContext, groups: Sequence[str] = PRODUCTION_GROUPS) -> FeatureSequence:
     return assemble_features(extract_grouped_features(ctx, groups), groups)
 
 
@@ -681,7 +667,5 @@ def extract_features(
     ocr_labels: list[str] | None = None,
     page_positions: list[int] | None = None,
 ) -> FeatureSequence:
-    """Features de production (API historique de annotate_lines_crf.py)."""
-    return extract_features_from_context(
-        SequenceContext(lines, source_line_numbers, ocr_labels, page_positions)
-    )
+    """Features de production (API historique de numrev label)."""
+    return extract_features_from_context(SequenceContext(lines, source_line_numbers, ocr_labels, page_positions))

@@ -1,16 +1,16 @@
 """Correspondance des rubriques de deux annuaires, partagée par
-`align_directories.py` (Dedupe), `align_directories_nw.py` et
-`tools/display_alignment.py`.
+`numrev align dedupe` (Dedupe), `numrev align nw` et
+`numrev view alignment`.
 
 Une **rubrique** est la suite contiguë des ENTRY de même rubrique
-(`Record.section`, `lib/alignment.py`) ; elle est identifiée par l'uuid de
+(`Record.section`, `numrev/alignment/records.py`) ; elle est identifiée par l'uuid de
 son TITLE (`Record.section_uuid`).
 
 L'ordre des rubriques est stable d'une édition à l'autre ; elles sont donc
 alignées par Needleman-Wunsch sur la similarité Jaro-Winkler de leur clé
 (« liste » / « listes de non-commerçans »). Ce qui échappe à l'ordre ou au
 seuil se corrige dans un **patch** versionné et édité à la main,
-`data/alignement/<gauche>__<droite>.sections.csv` :
+`data/alignment/<gauche>__<droite>.sections.csv` :
 
 - une ligne à deux uuid lie deux rubriques ; un même uuid peut figurer dans
   plusieurs lignes : les composantes connexes forment des **groupes** 1-1,
@@ -21,22 +21,23 @@ seuil se corrige dans un **patch** versionné et édité à la main,
 Le patch gagne : ses rubriques sont retirées de l'alignement automatique.
 Les titres recopiés servent à la relecture et au **réancrage** : si un uuid
 disparaît (re-segmentation amont), on cherche la rubrique de même clé,
-unique dans l'annuaire ; faute de quoi la ligne est orpheline (signalée,
-non appliquée).
+unique dans l'annuaire ; faute de quoi la ligne est orpheline (non
+appliquée ; les scripts d'alignement paniquent, sauf `--force` :
+numrev/curation.py).
 """
 
-import csv
 import json
-import os
 from collections import defaultdict
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 
 from rapidfuzz.distance import JaroWinkler
 from rapidfuzz.process import cdist
 
-from lib.alignment import SOURCE_MANUAL, Record, clean_title
-from lib.sequence import needleman_wunsch
+from numrev.alignment.records import SOURCE_MANUAL, Link, Record, clean_title
+from numrev.alignment.sequence import needleman_wunsch
+from numrev.command import Writes
+from numrev.curation import read_dataclasses, write_csv
 
 SOURCE_AUTO = "auto"
 DEFAULT_THRESHOLD = 0.8  # similarité Jaro-Winkler minimale de deux clés alignées
@@ -88,25 +89,12 @@ SECTION_PATCH_FIELDS = [f.name for f in fields(SectionPatchEntry)]
 
 def read_section_patch(path: Path) -> list[SectionPatchEntry]:
     """Lignes du patch, dans l'ordre du fichier (vide s'il n'existe pas)."""
-    if not path.exists():
-        return []
-    with path.open(encoding="utf-8", newline="") as handle:
-        return [
-            SectionPatchEntry(**{name: (row.get(name) or "").strip() for name in SECTION_PATCH_FIELDS})
-            for row in csv.DictReader(handle)
-        ]
+    return read_dataclasses(path, SectionPatchEntry)
 
 
 def write_section_patch(path: Path, entries: list[SectionPatchEntry]) -> None:
-    """Écriture atomique (fichier temporaire puis renommage)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    with temporary.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=SECTION_PATCH_FIELDS)
-        writer.writeheader()
-        for entry in entries:
-            writer.writerow({name: getattr(entry, name) for name in SECTION_PATCH_FIELDS})
-    os.replace(temporary, path)
+    """Écriture atomique (numrev/curation.py)."""
+    write_csv(path, SECTION_PATCH_FIELDS, (asdict(entry) for entry in entries))
 
 
 def validate_section_patch(entries: list[SectionPatchEntry]) -> None:
@@ -124,8 +112,14 @@ def validate_section_patch(entries: list[SectionPatchEntry]) -> None:
                 paired[key].append(number)
         elif entry.uuids():
             alone[entry.uuids()[0]].append(number)
-    problems += [f"paire {left} ↔ {right} aux lignes {', '.join(map(str, numbers))}" for (left, right), numbers in pairs.items() if len(numbers) > 1]
-    problems += [f"{side} {uuid} sans correspondance aux lignes {', '.join(map(str, numbers))}" for (side, uuid), numbers in alone.items() if len(numbers) > 1]
+    problems += [
+        f"paire {left} ↔ {right} aux lignes {', '.join(map(str, numbers))}" for (left, right), numbers in pairs.items() if len(numbers) > 1
+    ]
+    problems += [
+        f"{side} {uuid} sans correspondance aux lignes {', '.join(map(str, numbers))}"
+        for (side, uuid), numbers in alone.items()
+        if len(numbers) > 1
+    ]
     problems += [
         f"{side} {uuid} apparié (lignes {', '.join(map(str, paired[(side, uuid)]))}) et sans correspondance (ligne {numbers[0]})"
         for (side, uuid), numbers in alone.items()
@@ -271,16 +265,30 @@ def align_sections(
 
 
 def load_section_alignment(
-    left_records: list[Record], right_records: list[Record], patch_path: Path, threshold: float = DEFAULT_THRESHOLD, rewrite: bool = True
+    left_records: list[Record],
+    right_records: list[Record],
+    patch_path: Path,
+    threshold: float = DEFAULT_THRESHOLD,
+    writes: Writes | None = None,
 ) -> SectionAlignment:
-    """Lit, valide et applique le patch (ValueError s'il est incohérent) ; le
-    réécrit si des lignes ont été réancrées (sauf `rewrite=False`)."""
+    """Lit, valide et applique le patch (ValueError s'il est incohérent). Si
+    des lignes ont été réancrées, le patch est réécrit via `writes`
+    (numrev/command.py) ; sans `writes` (lecteurs : viewer, export, audit), jamais."""
     entries = read_section_patch(patch_path)
     validate_section_patch(entries)
     alignment = align_sections(left_records, right_records, entries, threshold)
-    if rewrite and alignment.resolution.reanchored:
-        write_section_patch(patch_path, updated_section_patch(entries, alignment.resolution))
+    if writes is not None and alignment.resolution.reanchored:
+        writes.add(patch_path, lambda: write_section_patch(patch_path, updated_section_patch(entries, alignment.resolution)))
     return alignment
+
+
+def section_orphans(alignment: SectionAlignment) -> list[str]:
+    """Lignes orphelines du patch des rubriques, lisibles (numrev/curation.py :
+    elles font paniquer les scripts, sauf --force)."""
+    return [
+        " ↔ ".join(filter(None, (f"{entry.left_uuid} {entry.left_title}".strip(), f"{entry.right_uuid} {entry.right_title}".strip())))
+        for entry in alignment.resolution.orphans
+    ]
 
 
 def corresponding(alignment: SectionAlignment) -> set[tuple[str, str]]:
@@ -323,3 +331,39 @@ def canonical_training(data: dict, left_keys: dict[str, str], right_keys: dict[s
 
 def canonical_training_text(text: str, left_keys: dict[str, str], right_keys: dict[str, str]) -> str:
     return json.dumps(canonical_training(json.loads(text), left_keys, right_keys), ensure_ascii=False)
+
+
+def segments(alignment: SectionAlignment) -> list[tuple[list[Section], list[Section]]]:
+    """Segments à aligner : un par groupe de rubriques appariées (groupes du
+    patch, entrées de leurs N rubriques concaténées, puis paires
+    automatiques). On n'apparie **jamais** des entrées de rubriques qui ne se
+    correspondent pas : une rubrique sans correspondance (non alignée ou
+    déclarée seule) n'est dans aucun segment ; pour l'apparier, la lier dans
+    le patch des rubriques."""
+    return [(group.left, group.right) for group in alignment.groups]
+
+
+def segment_entries(alignment: SectionAlignment) -> list[tuple[list[Record], list[Record]]]:
+    """Entrées de chaque segment (`segments`), de gauche et de droite, dans
+    l'ordre des annuaires."""
+    return [
+        ([record for section in left for record in section.records], [record for section in right for record in section.records])
+        for left, right in segments(alignment)
+    ]
+
+
+def restrict_to_corresponding(
+    links: list[Link], left: dict[str, Record], right: dict[str, Record], alignment: SectionAlignment
+) -> tuple[list[Link], list[Link]]:
+    """(liens gardés, liens écartés) : un lien entre deux entrées dont les
+    rubriques ne se correspondent pas (`corresponding`) est écarté, quelle
+    que soit sa source — Dedupe, ou patch des entrées (corriger alors le
+    patch des rubriques). Les liens vers des entrées inconnues sont gardés
+    (signalés ailleurs)."""
+    matching = corresponding(alignment)
+    kept, dropped = [], []
+    for link in links:
+        left_record, right_record = left.get(link.left_uuid), right.get(link.right_uuid)
+        known = left_record is not None and right_record is not None
+        (dropped if known and (left_record.section_uuid, right_record.section_uuid) not in matching else kept).append(link)
+    return kept, dropped

@@ -1,8 +1,8 @@
 """Corrections manuelles d'un alignement : le fichier patch.
 
-`align_directories.py` peut être relancé à chaque amélioration des étapes
+`numrev align dedupe` peut être relancé à chaque amélioration des étapes
 amont ; les décisions humaines vivent donc à part, dans
-`data/alignement/<gauche>__<droite>.patch.csv` (versionné), et sont
+`data/alignment/<gauche>__<droite>.patch.csv` (versionné), et sont
 réappliquées après chaque inférence. Une ligne du patch est :
 
 - une **paire** (`left_uuid` et `right_uuid`) : ces deux entrées se
@@ -13,23 +13,31 @@ Le patch gagne : tout lien Dedupe qui touche un uuid du patch est écarté,
 puis les paires du patch sont ajoutées (source `manuel`). Valider une paire
 trouvée par Dedupe la protège des relances.
 
+La colonne facultative `certitude` vaut `incertaine` quand la relecture n'a
+pas permis de trancher (homonymes, graphies trop éloignées…) : la paire est
+appliquée, mais avec la source `manuel-incertain`, qui reste visible dans
+l'export ; pour un uuid seul, « probablement sans correspondance »
+(appliqué comme les autres). Un patch sans cette colonne reste valide.
+
 Rubrique et texte balisé sont recopiés dans le patch pour la relecture et
 pour le **réancrage** : si une étape amont re-segmente une entrée, son uuid
 change ; on cherche alors l'entrée unique de même texte normalisé dans la
 même rubrique. Faute de candidat unique, la ligne est **orpheline** :
-signalée, jamais appliquée.
+jamais appliquée, et les scripts qui produisent un alignement paniquent
+(`--force` pour l'ignorer), comme pour les autres étapes curées
+(numrev/curation.py).
 """
 
-import csv
-import os
 from collections import defaultdict
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 
-from lib.alignment import SOURCE_MANUAL, Link, Record, clean_text, clean_title, display_text
-from lib.ner.spans import normalize_markdown, parse_tagged_text
+from numrev.alignment.records import SOURCE_MANUAL, SOURCE_MANUAL_UNCERTAIN, Link, Record, clean_text, clean_title, display_text
+from numrev.curation import read_dataclasses, write_csv
+from numrev.ner.spans import normalize_markdown, parse_tagged_text
 
 SIDES = ("left", "right")
+UNCERTAIN = "incertaine"
 
 
 @dataclass(frozen=True)
@@ -43,6 +51,7 @@ class PatchEntry:
     left_tagged_text: str = ""
     right_tagged_text: str = ""
     note: str = ""
+    certitude: str = ""  # vide : décision sûre ; UNCERTAIN : relecture sans conclusion ferme
 
     def uuids(self) -> list[tuple[str, str]]:
         """(côté, uuid) renseignés."""
@@ -51,6 +60,10 @@ class PatchEntry:
     @property
     def is_pair(self) -> bool:
         return bool(self.left_uuid and self.right_uuid)
+
+    @property
+    def is_uncertain(self) -> bool:
+        return self.certitude.lower() == UNCERTAIN
 
 
 PATCH_FIELDS = [f.name for f in fields(PatchEntry)]
@@ -76,39 +89,30 @@ class PatchStats:
 # ----------------------------------------------------------------------
 def read_patch(path: Path) -> list[PatchEntry]:
     """Lignes du patch, dans l'ordre du fichier (vide s'il n'existe pas)."""
-    if not path.exists():
-        return []
-    with path.open(encoding="utf-8", newline="") as handle:
-        return [
-            PatchEntry(**{name: (row.get(name) or "").strip() for name in PATCH_FIELDS})
-            for row in csv.DictReader(handle)
-        ]
+    return read_dataclasses(path, PatchEntry)
 
 
 def write_patch(path: Path, entries: list[PatchEntry]) -> None:
-    """Écriture atomique (fichier temporaire puis renommage)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    with temporary.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=PATCH_FIELDS)
-        writer.writeheader()
-        for entry in entries:
-            writer.writerow({name: getattr(entry, name) for name in PATCH_FIELDS})
-    os.replace(temporary, path)
+    """Écriture atomique (numrev/curation.py)."""
+    write_csv(path, PATCH_FIELDS, (asdict(entry) for entry in entries))
 
 
 def validate(entries: list[PatchEntry]) -> None:
-    """Lève ValueError si une ligne n'a aucun uuid ou si un uuid apparaît
-    dans plusieurs lignes (numéros de ligne du CSV, en-tête = 1)."""
+    """Lève ValueError si une ligne n'a aucun uuid, si sa `certitude` n'est
+    ni vide ni `incertaine`, ou si un uuid apparaît dans plusieurs lignes
+    (numéros de ligne du CSV, en-tête = 1)."""
     problems = [f"ligne {number} : aucun uuid" for number, entry in enumerate(entries, start=2) if not entry.uuids()]
+    problems += [
+        f"ligne {number} : certitude « {entry.certitude} » (attendu : vide ou « {UNCERTAIN} »)"
+        for number, entry in enumerate(entries, start=2)
+        if entry.certitude and not entry.is_uncertain
+    ]
     seen: dict[tuple[str, str], list[int]] = defaultdict(list)
     for number, entry in enumerate(entries, start=2):
         for key in entry.uuids():
             seen[key].append(number)
     problems += [
-        f"{side} {uuid} présent aux lignes {', '.join(map(str, numbers))}"
-        for (side, uuid), numbers in seen.items()
-        if len(numbers) > 1
+        f"{side} {uuid} présent aux lignes {', '.join(map(str, numbers))}" for (side, uuid), numbers in seen.items() if len(numbers) > 1
     ]
     if problems:
         raise ValueError("Patch incohérent :\n- " + "\n- ".join(problems))
@@ -117,10 +121,10 @@ def validate(entries: list[PatchEntry]) -> None:
 # ----------------------------------------------------------------------
 # Construction
 # ----------------------------------------------------------------------
-def entry_from_records(left: Record | None, right: Record | None, note: str = "") -> PatchEntry:
+def entry_from_records(left: Record | None, right: Record | None, note: str = "", certitude: str = "") -> PatchEntry:
     """Ligne de patch pour une paire (deux entrées) ou une entrée sans
     correspondance (l'autre à None), avec l'instantané texte + rubrique."""
-    values = {"note": note}
+    values = {"note": note, "certitude": certitude}
     for side, record in (("left", left), ("right", right)):
         if record is not None:
             values |= {
@@ -136,7 +140,7 @@ def entry_from_records(left: Record | None, right: Record | None, note: str = ""
 # Réancrage
 # ----------------------------------------------------------------------
 def anchor_key(section: str, tagged_text: str) -> tuple[str, str]:
-    """(rubrique, texte) normalisés comme dans `lib/alignment.py`."""
+    """(rubrique, texte) normalisés comme dans `numrev/alignment/records.py`."""
     try:
         text, _ = parse_tagged_text(tagged_text)
     except ValueError:
@@ -190,6 +194,29 @@ def resolve(entries: list[PatchEntry], left: dict[str, Record], right: dict[str,
     return resolution
 
 
+def load_patch(path: Path, left: dict[str, Record], right: dict[str, Record]) -> tuple[list[PatchEntry], Resolution]:
+    """Lit, valide (ValueError) et résout le patch, avant tout calcul."""
+    entries = read_patch(path)
+    validate(entries)
+    return entries, resolve(entries, left, right)
+
+
+def declared_unmatched(resolution: Resolution) -> set[str]:
+    """uuid déclarés sans correspondance par le patch (jamais proposés comme candidates)."""
+    return {uuid for entry in resolution.entries if not entry.is_pair for _, uuid in entry.uuids()}
+
+
+def orphan_descriptions(resolution: Resolution) -> list[str]:
+    """Lignes orphelines, lisibles (côté, uuid, rubrique, texte)."""
+    return [
+        " ↔ ".join(
+            f"{side} {getattr(entry, f'{side}_uuid')} · {getattr(entry, f'{side}_section')} · {getattr(entry, f'{side}_tagged_text')}"
+            for side, _ in entry.uuids()
+        )
+        for entry in resolution.orphans
+    ]
+
+
 def updated_patch(entries: list[PatchEntry], resolution: Resolution) -> list[PatchEntry]:
     """Le patch à réécrire : lignes réancrées remplacées, orphelines gardées
     telles quelles (à corriger à la main), ordre conservé."""
@@ -202,13 +229,19 @@ def updated_patch(entries: list[PatchEntry], resolution: Resolution) -> list[Pat
 # ----------------------------------------------------------------------
 def apply_patch(links: list[Link], entries: list[PatchEntry]) -> tuple[list[Link], PatchStats]:
     """Liens Dedupe + patch (voir la docstring du module). Une paire validée
-    telle que Dedupe l'avait trouvée garde son score."""
+    telle que Dedupe l'avait trouvée garde son score ; une paire marquée
+    incertaine prend la source `manuel-incertain`."""
     stats = PatchStats()
     patched_left = {entry.left_uuid for entry in entries if entry.left_uuid}
     patched_right = {entry.right_uuid for entry in entries if entry.right_uuid}
     scores = {(link.left_uuid, link.right_uuid): link.score for link in links}
     manual = [
-        Link(entry.left_uuid, entry.right_uuid, scores.get((entry.left_uuid, entry.right_uuid)), SOURCE_MANUAL)
+        Link(
+            entry.left_uuid,
+            entry.right_uuid,
+            scores.get((entry.left_uuid, entry.right_uuid)),
+            SOURCE_MANUAL_UNCERTAIN if entry.is_uncertain else SOURCE_MANUAL,
+        )
         for entry in entries
         if entry.is_pair
     ]

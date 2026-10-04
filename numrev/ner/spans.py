@@ -3,7 +3,7 @@
 Un empan est un triplet (début, fin exclue, classe) sur un texte donné. Trois
 représentations circulent dans le pipeline :
 
-- `tagged_text` (colonne CSV de `infer_gliner.py`, corrigée à la main) :
+- `tagged_text` (colonne CSV de `numrev tag`, corrigée à la main) :
   le texte intégral avec des balises `<SUBJ>…</SUBJ>` ; `<` et `>` du texte
   sont échappés en `&lt;` / `&gt;` ;
 - les tâches Label Studio (`data.text` + `annotations`/`predictions`) ;
@@ -22,7 +22,7 @@ import re
 from collections.abc import Iterable, Sequence
 from typing import NamedTuple
 
-from lib.crf.features import EMPHASIS_PATTERN
+from numrev.crf.features import EMPHASIS_PATTERN
 
 LABELS = ("SUBJ", "DESC", "ADDR")
 TAG_PATTERN = re.compile(r"<(/?)(SUBJ|DESC|ADDR)>")
@@ -244,9 +244,7 @@ def char_span_to_word_span(tokens: Sequence[Token], start_char: int, end_char: i
     mots retenus sont ceux qui *chevauchent* l'empan, ce qui élargit à la
     frontière de mot la plus proche (limitation inhérente à la NER au niveau
     mot). None si l'empan ne chevauche aucun mot."""
-    overlapping = [
-        index for index, token in enumerate(tokens) if token.start_char < end_char and token.end_char > start_char
-    ]
+    overlapping = [index for index, token in enumerate(tokens) if token.start_char < end_char and token.end_char > start_char]
     if not overlapping:
         return None
     return overlapping[0], overlapping[-1]

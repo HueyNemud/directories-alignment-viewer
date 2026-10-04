@@ -1,15 +1,21 @@
-"""Titres Markdown (`#`, `##`, …) des lignes TITLE : niveau et texte lisible.
+"""Titres Markdown (`#`, `##`, …) des lignes TITLE : niveau, texte lisible
+et racine de l'arbre des titres.
 
-Partagé par `build_entity_tree.py` (arbre des titres), `lib/alignment.py`
-(rubrique d'une entrée) et `tools/display_directory.py` (bandeaux de
+Partagé par `numrev assemble` (arbre des titres), `numrev/alignment/records.py`
+(rubrique d'une entrée) et `numrev view directory` (bandeaux de
 rubrique).
 """
 
 import re
+import uuid
 
-from lib.ner.spans import normalize_markdown
+from numrev.ner.spans import normalize_markdown
 
 HEADING_PATTERN = re.compile(r"^\s*(#+)")
+
+# Parent des titres de plus haut niveau et des entrées avant tout titre : racine
+# commune à tous les documents (`numrev assemble`).
+ROOT_UUID = str(uuid.UUID(int=0))
 
 
 def title_level(markdown: str) -> int | None:

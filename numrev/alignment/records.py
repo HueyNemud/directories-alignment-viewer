@@ -1,9 +1,9 @@
 """Chargement d'un annuaire complet pour l'alignement entre éditions
-(`align_directories.py`, `tools/display_alignment.py`).
+(`numrev align dedupe`, `numrev view alignment`).
 
 Un annuaire `annuaires/<volume>/` est découpé en plages de pages traitées
 séparément (`<volume>/<première>-<dernière>/`). On lit, dans chaque plage, son
-propre `<volume>.<plage>….merged.ner.curated.csv` et on concatène les plages
+propre `<volume>.<plage>….ner.csv` et on concatène les plages
 dans l'ordre des pages, pour comparer des annuaires entiers.
 
 Chaque ENTRY devient un `Record` décrit par trois champs de comparaison :
@@ -11,7 +11,7 @@ Chaque ENTRY devient un `Record` décrit par trois champs de comparaison :
 - `section` : la rubrique, c'est-à-dire le titre ancêtre de niveau `##`, à
   défaut celui de niveau `#` (d'une édition à l'autre, une même rubrique
   change parfois de niveau). L'arbre des titres est celui de `parent_uuid`
-  (`build_entity_tree.py`), propre à chaque fichier : une plage n'hérite pas
+  (`numrev assemble`), propre à chaque fichier : une plage n'hérite pas
   des titres de la précédente. `section` est la clé comparée (sans accents
   ni ponctuation) ; `section_title` garde le titre lisible, pour l'affichage
   et la relecture ;
@@ -26,11 +26,15 @@ import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
-from lib.ner.corpus import CURATED_NER_SUFFIX
-from lib.ner.spans import normalize_markdown, parse_tagged_text, project_spans
-from lib.titles import title_level, title_text
+import numpy as np
+from rapidfuzz.distance import Indel, JaroWinkler
+from rapidfuzz.process import cdist
 
-RANGE_PATTERN = re.compile(r"^(\d+)-(\d+)$")
+from numrev.curation import read_csv
+from numrev.ner.spans import normalize_markdown, parse_tagged_text, project_spans
+from numrev.paths import NER, range_dirs, range_document
+from numrev.titles import title_level, title_text
+
 SECTION_LEVELS = (2, 1)  # niveau de titre préféré pour la rubrique, puis repli
 NON_WORD = re.compile(r"[\W_]+")
 
@@ -50,17 +54,12 @@ class Record:
     section_uuid: str = ""  # uuid du TITLE de la rubrique, vide sans rubrique
 
 
-def range_dirs(volume_dir: Path) -> list[Path]:
-    """Sous-dossiers de plages (`7-177`, `179-186`…), triés par première page."""
-    ranges = [path for path in volume_dir.iterdir() if path.is_dir() and RANGE_PATTERN.match(path.name)]
-    return sorted(ranges, key=lambda path: int(RANGE_PATTERN.match(path.name).group(1)))
-
-
-def curated_csv(range_dir: Path) -> Path:
-    """Le CSV NER corrigé propre à la plage (nommé d'après le volume et la plage)."""
-    path = range_dir / f"{range_dir.parent.name}.{range_dir.name}{CURATED_NER_SUFFIX}"
+def ner_csv(range_dir: Path) -> Path:
+    """Le CSV NER (corrigé à la main, numrev/curation.py) propre à la plage,
+    nommé d'après le volume et la plage."""
+    path = range_document(range_dir, NER)
     if not path.exists():
-        raise FileNotFoundError(f"CSV NER corrigé introuvable : {path}")
+        raise FileNotFoundError(f"CSV NER introuvable : {path}")
     return path
 
 
@@ -110,8 +109,7 @@ def section_of(parent_uuid: str, titles: dict[str, tuple[str, str]]) -> tuple[st
 
 
 def load_document(path: Path, start: int = 0) -> list[Record]:
-    with path.open(encoding="utf-8", newline="") as handle:
-        rows = list(csv.DictReader(handle))
+    rows = read_csv(path)[1]
     titles = {row["uuid"]: (row.get("parent_uuid", ""), row.get("markdown", "")) for row in rows if row.get("entity") == "TITLE"}
     records = []
     for row in rows:
@@ -146,7 +144,7 @@ def load_volume(volume_dir: Path) -> list[Record]:
         raise FileNotFoundError(f"Aucun dossier de plage (`<début>-<fin>`) dans {volume_dir}")
     records: list[Record] = []
     for range_dir in ranges:
-        records += load_document(curated_csv(range_dir), start=len(records))
+        records += load_document(ner_csv(range_dir), start=len(records))
     duplicates = len(records) - len({record.uuid for record in records})
     if duplicates:
         warnings.warn(f"{volume_dir.name} : {duplicates} uuid en double, seule la dernière occurrence est comparée")
@@ -157,7 +155,7 @@ def dedupe_records(records: list[Record], section_keys: dict[str, str] | None = 
     """Données au format Dedupe (uuid → champs), en minuscules (la casse des
     noms varie d'une édition à l'autre : « ARCHÉDÉACON » / « Archédéacon »),
     `None` pour un champ vide. `section_keys` : clé de rubrique → clé
-    canonique commune aux deux annuaires (`lib/section_alignment.py`)."""
+    canonique commune aux deux annuaires (`numrev/alignment/sections.py`)."""
     section_keys = section_keys or {}
     return {
         record.uuid: {
@@ -169,12 +167,38 @@ def dedupe_records(records: list[Record], section_keys: dict[str, str] | None = 
     }
 
 
+def similarity_matrix(left: list[Record], right: list[Record], subj_weight: float) -> np.ndarray:
+    """Similarité de chaque entrée de gauche à chaque entrée de droite, sur
+    les champs de Dedupe : `w · JaroWinkler(subj) + (1 − w) · Indel(text)`,
+    le texte seul si l'une des deux n'a pas de SUBJ (`numrev align nw`,
+    `numrev/alignment/review.py`)."""
+    left_fields, right_fields = dedupe_records(left), dedupe_records(right)
+    left_values = [left_fields[record.uuid] for record in left]
+    right_values = [right_fields[record.uuid] for record in right]
+
+    def matrix(name: str, scorer) -> np.ndarray:
+        return cdist(
+            [values[name] or "" for values in left_values],
+            [values[name] or "" for values in right_values],
+            scorer=scorer.normalized_similarity,
+            dtype=np.float32,
+            workers=-1,
+        )
+
+    text = matrix("text", Indel)
+    subj = matrix("subj", JaroWinkler)
+    both = np.outer([bool(values["subj"]) for values in left_values], [bool(values["subj"]) for values in right_values])
+    return np.where(both, subj_weight * subj + (1 - subj_weight) * text, text)
+
+
 # ----------------------------------------------------------------------
-# Correspondances (CSV `annuaires/alignements/…`)
+# Correspondances (CSV `annuaires/alignments/…`)
 # ----------------------------------------------------------------------
 SOURCE_DEDUPE = "dedupe"
 SOURCE_MANUAL = "manuel"
-SOURCE_NW = "nw"  # `align_directories_nw.py` : alignement ordonné
+SOURCE_MANUAL_UNCERTAIN = "manuel-incertain"  # paire du patch marquée `certitude=incertaine`
+SOURCE_CANDIDATE = "candidate"  # paire non retenue proposée à la relecture (`numrev/alignment/review.py`), jamais un lien
+SOURCE_NW = "nw"  # `numrev align nw` : alignement ordonné
 SOURCE_NW_CONTEXT = "nw-contexte"  # idem, décidée par le pair-HMM entre deux ancres
 SOURCE_NW_RESIDUAL = "nw-residuel"  # idem, passe résiduelle (inversions locales)
 LINK_FIELDS = [
@@ -231,13 +255,7 @@ def write_links(path: Path, links: list[Link], left: dict[str, Record], right: d
 
 
 def read_links(path: Path) -> list[Link]:
-    with path.open(encoding="utf-8", newline="") as handle:
-        return [
-            Link(
-                row["left_uuid"],
-                row["right_uuid"],
-                float(row["score"]) if row.get("score") else None,
-                row.get("source") or SOURCE_DEDUPE,
-            )
-            for row in csv.DictReader(handle)
-        ]
+    return [
+        Link(row["left_uuid"], row["right_uuid"], float(row["score"]) if row.get("score") else None, row.get("source") or SOURCE_DEDUPE)
+        for row in read_csv(path)[1]
+    ]

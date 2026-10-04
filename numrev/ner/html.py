@@ -1,9 +1,9 @@
 """Rendu HTML des empans NER (fonctions pures, sans Streamlit), partagé par
-les visualiseurs `tools/display_directory.py` et `tools/display_alignment.py`."""
+les visualiseurs `numrev view directory` et `numrev view alignment`."""
 
 import html
 
-from lib.ner.spans import parse_tagged_text
+from numrev.ner.spans import parse_tagged_text
 
 LABEL_COLORS = {  # fond, texte/bordure
     "SUBJ": ("#dbeafe", "#1d4ed8"),
@@ -24,8 +24,7 @@ SPAN_CSS = """
 def badge(label: str, colors: tuple[str, str] = DEFAULT_COLORS) -> str:
     background, foreground = colors
     return (
-        f'<span class="badge" style="background:{background};color:{foreground};border-color:{foreground}">'
-        f"{html.escape(label)}</span>"
+        f'<span class="badge" style="background:{background};color:{foreground};border-color:{foreground}">' f"{html.escape(label)}</span>"
     )
 
 
